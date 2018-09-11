@@ -24,15 +24,44 @@ import (
 	"fmt"
 	"go/build"
 	"os"
+	"path"
 	"path/filepath"
 )
 
 var stdFlag = flag.Bool("std", false, "report unused standard packages")
+var installed = flag.Bool("installed", false, "only use installed binaries to check")
+var wholeGit = flag.Bool("git", false, "only report whole unused git trees")
+
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func findGit(pkg *build.Package) string {
+	start := pkg.Dir
+	end := pkg.SrcRoot
+	if len(end) == 0 {
+		return ""
+	}
+	curr := start
+	for curr != end {
+		dotGit := path.Join(curr, ".git")
+		if exists(dotGit) {
+			return curr
+		}
+		curr = path.Dir(curr)
+	}
+	return ""
+}
 
 func main() {
 	ctx := build.Default
 
+	flag.Parse()
+
+	gits := make(map[string]string)
 	pkgs := make(map[string]*build.Package)
+	gitUsed := make(map[string]bool)
 	for _, root := range ctx.SrcDirs() {
 		err := filepath.Walk(root, func(path string, fi os.FileInfo, err error) error {
 			if !fi.IsDir() {
@@ -43,6 +72,13 @@ func main() {
 				return nil
 			}
 			pkgs[pkg.ImportPath] = pkg
+			if *wholeGit {
+				if g := findGit(pkg); g != "" {
+					gits[pkg.ImportPath] = g
+					gitUsed[g] = false
+
+				}
+			}
 			return nil
 		})
 		if err != nil {
@@ -57,6 +93,10 @@ func main() {
 			return
 		}
 		used[pkg.ImportPath] = true
+		git := gits[pkg.ImportPath]
+		if len(git) > 0 {
+			gitUsed[git] = true
+		}
 		imports := append([]string{}, pkg.Imports...)
 		imports = append(imports, pkg.TestImports...)
 		for _, p := range imports {
@@ -72,16 +112,33 @@ func main() {
 	}
 	for _, pkg := range pkgs {
 		if pkg.Name == "main" {
+			if *installed {
+				b := path.Base(pkg.Dir)
+				bin := path.Join(pkg.BinDir, b)
+				if !exists(bin) {
+					fmt.Fprintf(os.Stderr, "Skipping %q, not installed\n", b)
+					continue
+				}
+			}
 			recordDeps(pkg)
 		}
 	}
 
-	for path, pkg := range pkgs {
-		if !used[path] {
-			if pkg.Goroot && !*stdFlag {
+	if *wholeGit {
+		for path, used := range gitUsed {
+			if used {
 				continue
 			}
 			fmt.Println(path)
+		}
+	} else {
+		for path, pkg := range pkgs {
+			if !used[path] {
+				if pkg.Goroot && !*stdFlag {
+					continue
+				}
+				fmt.Println(path)
+			}
 		}
 	}
 }
